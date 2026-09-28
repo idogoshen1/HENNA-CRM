@@ -1,6 +1,7 @@
 import os
 import hmac
 import hashlib
+import html
 import io
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -36,6 +37,9 @@ TIMEZONE_NAME = os.getenv("TIMEZONE", "Asia/Jerusalem")
 NEW_CONVERSATION_AFTER_HOURS = int(os.getenv("NEW_CONVERSATION_AFTER_HOURS", "24"))
 DEFAULT_OWNER = os.getenv("DEFAULT_OWNER", "מעיין")
 DEFAULT_PRIORITY = os.getenv("DEFAULT_PRIORITY", "בינונית")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+ALERT_EMAIL = os.getenv("ALERT_EMAIL", "")
+EMAIL_FROM = os.getenv("EMAIL_FROM", "Olam HaHina <onboarding@resend.dev>")
 
 TZ = ZoneInfo(TIMEZONE_NAME)
 
@@ -312,6 +316,63 @@ def new_lead_uid(received_at):
     return "LEAD-" + received_at.astimezone(TZ).strftime("%Y%m%d-%H%M%S-%f")
 
 
+def send_new_lead_email(lead):
+    """Send a best-effort email alert for a newly created campaign lead.
+
+    This runs only *after* the lead and message have been committed to PostgreSQL.
+    Email failures are logged and never roll back or lose the lead.
+    """
+    if not RESEND_API_KEY or not ALERT_EMAIL:
+        return {"status": "disabled"}
+
+    def esc(value):
+        return html.escape(str(value or ""))
+
+    local_time = lead.created_at.astimezone(TZ).strftime("%d/%m/%Y %H:%M")
+    customer = lead.customer_name or "ללא שם"
+    platform = lead.platform or "WhatsApp"
+    campaign = lead.campaign_name or lead.campaign_id or "לא התקבל שם קמפיין"
+    ad = lead.ad_name or lead.ad_id or "לא התקבל שם מודעה"
+    message = lead.first_message or ""
+
+    subject = f"ליד חדש - עולם החינה - {customer}"
+    html_body = f"""
+    <div dir="rtl" style="font-family:Arial,sans-serif;line-height:1.6">
+      <h2>🔔 ליד חדש - עולם החינה</h2>
+      <table style="border-collapse:collapse">
+        <tr><td><b>שם:</b></td><td>{esc(customer)}</td></tr>
+        <tr><td><b>טלפון:</b></td><td>{esc(lead.phone)}</td></tr>
+        <tr><td><b>מקור:</b></td><td>{esc(platform)}</td></tr>
+        <tr><td><b>קמפיין:</b></td><td>{esc(campaign)}</td></tr>
+        <tr><td><b>מודעה:</b></td><td>{esc(ad)}</td></tr>
+        <tr><td><b>נכנס בתאריך:</b></td><td>{esc(local_time)}</td></tr>
+        <tr><td><b>Lead ID:</b></td><td>{esc(lead.lead_uid)}</td></tr>
+      </table>
+      <p><b>הודעה ראשונה:</b></p>
+      <div style="padding:10px;border:1px solid #ddd;border-radius:8px;white-space:pre-wrap">{esc(message)}</div>
+    </div>
+    """
+
+    response = requests.post(
+        "https://api.resend.com/emails",
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+            "Idempotency-Key": f"new-lead/{lead.lead_uid}",
+        },
+        json={
+            "from": EMAIL_FROM,
+            "to": [ALERT_EMAIL],
+            "subject": subject,
+            "html": html_body,
+        },
+        timeout=10,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return {"status": "sent", "email_id": data.get("id", "")}
+
+
 def process_message(phone, name, message):
     meta_message_id = str(message.get("id", ""))
     if not meta_message_id:
@@ -409,10 +470,21 @@ def process_message(phone, name, message):
     db.session.add(msg)
     db.session.commit()
 
+    email_alert = None
+    if result_status == "new_campaign_lead":
+        try:
+            email_alert = send_new_lead_email(lead)
+        except Exception as exc:
+            # The lead is already safely committed to PostgreSQL.
+            # Notification failure must never make Meta retry/lose the lead.
+            app.logger.exception("New lead email alert failed")
+            email_alert = {"status": "failed", "error": str(exc)[:500]}
+
     return {
         "status": result_status,
         "lead_id": lead.id,
         "lead_uid": lead.lead_uid,
+        "email_alert": email_alert,
     }
 
 
