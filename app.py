@@ -500,6 +500,45 @@ def admin_required(fn):
     return wrapper
 
 
+@app.post("/api/test-email")
+@admin_required
+def test_email():
+    """Send a test email from Railway without creating a lead."""
+    if not RESEND_API_KEY:
+        return jsonify({"ok": False, "error": "RESEND_API_KEY is not configured"}), 503
+    if not ALERT_EMAIL:
+        return jsonify({"ok": False, "error": "ALERT_EMAIL is not configured"}), 503
+
+    html_body = """
+    <div dir="rtl" style="font-family:Arial,sans-serif;line-height:1.6">
+      <h2>✅ בדיקת התראות - עולם החינה</h2>
+      <p>Railway הצליח לשלוח מייל דרך Resend.</p>
+      <p><b>Railway → Resend → Email</b></p>
+    </div>
+    """
+    try:
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": EMAIL_FROM,
+                "to": [ALERT_EMAIL],
+                "subject": "בדיקת התראות - עולם החינה",
+                "html": html_body,
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return jsonify({"ok": True, "email_id": data.get("id", ""), "to": ALERT_EMAIL})
+    except Exception as exc:
+        app.logger.exception("Test email failed")
+        return jsonify({"ok": False, "error": str(exc)[:500]}), 502
+
+
 def lead_to_dict(lead):
     total_paid = sum(float(p.amount or 0) for p in lead.payments)
     final_price = float(lead.final_price or 0) if lead.final_price is not None else None
