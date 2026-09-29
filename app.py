@@ -621,13 +621,13 @@ def morning_webhook(path_token=None):
         or (payload.get("document") or {}).get("id")
     )
 
-    # זמני לצורך הבדיקה הראשונה בלבד:
+        # זמני לצורך הבדיקה הראשונה בלבד:
     # נראה בדיוק איזה מבנה Morning שולחת.
-   app.logger.warning(
-         "MORNING WEBHOOK | document_id=%s | payload=%s",
-         document_id,
-         raw.decode("utf-8", errors="replace")[:4000],
-     )
+    app.logger.warning(
+        "MORNING WEBHOOK | document_id=%s | payload=%s",
+        document_id,
+        raw.decode("utf-8", errors="replace")[:4000],
+    )
 
     return jsonify({
         "ok": True,
