@@ -1053,10 +1053,10 @@ with db.engine.begin() as conn:
     for statement in statements:
         conn.execute(db.text(statement))
 
+
 with app.app_context():
     db.create_all()
     migrate_payments_table()
-
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
