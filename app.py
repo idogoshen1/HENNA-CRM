@@ -817,7 +817,7 @@ def find_morning_lead(recipient):
             return matches[0], "name"
 
     return None, ""
- def morning_document_type_name(type_code):
+def morning_document_type_name(type_code):
     names = {
         10: "הצעת מחיר",
         320: "חשבונית מס / קבלה",
@@ -1219,7 +1219,7 @@ def morning_webhook(path_token=None):
             lead
         )
 
-db.session.commit()
+        db.session.commit()
 
        
 
