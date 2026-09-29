@@ -781,18 +781,6 @@ def morning_emails(recipient):
 
 
 def find_morning_lead(recipient):
-    emails = morning_emails(recipient)
-
-    # 1. קודם אימייל
-    for email in emails:
-        lead = Lead.query.filter(
-            db.func.lower(Lead.email) == email.lower()
-        ).first()
-
-        if lead:
-            return lead, "email"
-
-    # 2. אחר כך טלפון
     phones = {
         normalize_phone(recipient.get("phone")),
         normalize_phone(recipient.get("mobile"))
@@ -800,21 +788,14 @@ def find_morning_lead(recipient):
 
     phones.discard("")
 
-    if phones:
-        for lead in Lead.query.all():
-            if normalize_phone(lead.phone) in phones:
-                return lead, "phone"
+    if not phones:
+        return None, ""
 
-    # 3. שם - רק אם יש ליד אחד כזה
-    name = str(recipient.get("name") or "").strip()
+    for lead in Lead.query.all():
+        lead_phone = normalize_phone(lead.phone)
 
-    if name:
-        matches = Lead.query.filter(
-            Lead.customer_name == name
-        ).limit(2).all()
-
-        if len(matches) == 1:
-            return matches[0], "name"
+        if lead_phone and lead_phone in phones:
+            return lead, "phone"
 
     return None, ""
 def morning_document_type_name(type_code):
