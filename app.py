@@ -624,10 +624,10 @@ def morning_webhook(path_token=None):
     # זמני לצורך הבדיקה הראשונה בלבד:
     # נראה בדיוק איזה מבנה Morning שולחת.
    app.logger.warning(
-        "MORNING WEBHOOK | document_id=%s | payload=%s",
-        document_id,
-        raw.decode("utf-8", errors="replace")[:4000],
-    )
+         "MORNING WEBHOOK | document_id=%s | payload=%s",
+         document_id,
+         raw.decode("utf-8", errors="replace")[:4000],
+     )
 
     return jsonify({
         "ok": True,
