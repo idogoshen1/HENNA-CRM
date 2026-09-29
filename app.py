@@ -1031,6 +1031,8 @@ def export_xlsx():
         download_name="Henna_CRM_Export.xlsx",
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
 def migrate_payments_table():
     if db.engine.dialect.name != "postgresql":
         return
@@ -1049,9 +1051,12 @@ def migrate_payments_table():
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_payments_payment_uid ON payments (payment_uid)"
     ]
 
-with db.engine.begin() as conn:
-    for statement in statements:
-        conn.execute(db.text(statement))
+    # Gunicorn runs more than one worker. The advisory lock makes sure only
+    # one worker performs the startup migration at a time.
+    with db.engine.begin() as conn:
+        conn.execute(db.text("SELECT pg_advisory_xact_lock(392026)"))
+        for statement in statements:
+            conn.execute(db.text(statement))
 
 
 with app.app_context():
