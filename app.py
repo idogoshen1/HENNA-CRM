@@ -817,6 +817,159 @@ def find_morning_lead(recipient):
             return matches[0], "name"
 
     return None, ""
+ def morning_document_type_name(type_code):
+    names = {
+        10: "הצעת מחיר",
+        320: "חשבונית מס / קבלה",
+        400: "קבלה",
+    }
+
+    return names.get(type_code, f"Morning {type_code}")
+
+
+def sync_morning_document_to_payment(document, payload, lead):
+    """
+    Creates/updates ONE CRM Payment for a Morning receipt/payment document.
+    Quotes and ordinary documents do not create Payments.
+    """
+
+    transactions = payload.get("transactions") or []
+    document_type = payload.get("type")
+
+    # קבלה / חשבונית מס-קבלה, או מסמך שיש בו תקבולים בפועל
+    is_payment_document = (
+        document_type in (320, 400)
+        or bool(transactions)
+    )
+
+    if not is_payment_document:
+        return {
+            "status": "not_payment_document"
+        }
+
+    # בלי התאמה לליד לא מכניסים תשלום לליד הלא נכון
+    if lead is None:
+        return {
+            "status": "unmatched_lead"
+        }
+
+    # מונע כפילות אם Morning שולחת שוב את אותו webhook
+    payment = Payment.query.filter_by(
+        morning_document_id=document.morning_document_id
+    ).first()
+
+    if payment is None:
+        payment = Payment(
+            payment_uid=new_payment_uid(),
+            lead_id=lead.id,
+            amount=document.total or 0
+        )
+
+        db.session.add(payment)
+
+    # נאסוף אמצעי תשלום ואסמכתאות מתוך פירוט התקבולים
+    methods = []
+    references = []
+    morning_payment_ids = []
+
+    for transaction in transactions:
+
+        method = (
+            transaction.get("method")
+            or transaction.get("type")
+            or transaction.get("paymentType")
+            or ""
+        )
+
+        if method not in (None, ""):
+            method = str(method)
+
+            if method not in methods:
+                methods.append(method)
+
+        reference = (
+            transaction.get("reference")
+            or transaction.get("referenceNumber")
+            or transaction.get("transactionId")
+            or ""
+        )
+
+        if reference:
+            reference = str(reference)
+
+            if reference not in references:
+                references.append(reference)
+
+        payment_id = (
+            transaction.get("id")
+            or transaction.get("paymentId")
+            or ""
+        )
+
+        if payment_id:
+            payment_id = str(payment_id)
+
+            if payment_id not in morning_payment_ids:
+                morning_payment_ids.append(payment_id)
+
+    payment.lead_id = lead.id
+
+    payment.amount = document.total or 0
+
+    payment.payment_type = morning_document_type_name(
+        document.document_type_code
+    )
+
+    payment.method = " / ".join(methods)
+
+    payment.reference = " / ".join(references)
+
+    payment.status = "שולם"
+
+    payment.note = (
+        document.description
+        or document.remarks
+        or ""
+    )
+
+    payment.morning_payment_id = (
+        morning_payment_ids[0]
+        if morning_payment_ids
+        else ""
+    )
+
+    payment.morning_document_id = (
+        document.morning_document_id
+    )
+
+    payment.document_type = morning_document_type_name(
+        document.document_type_code
+    )
+
+    payment.document_number = (
+        document.document_number
+    )
+
+    payment.document_url = (
+        document.document_url_he
+        or document.document_url_en
+        or ""
+    )
+
+    payment.last_sync_at = utc_now()
+
+    # תאריך תשלום
+    payment.paid_at = (
+        document.created_at_morning
+        or utc_now()
+    )
+
+    return {
+        "status": "payment_saved",
+        "payment_uid": payment.payment_uid,
+        "amount": float(payment.amount or 0),
+        "document_number": payment.document_number,
+    }
     
 @app.post("/webhook/morning")
 @app.post("/webhook/morning/<path_token>")
@@ -1060,7 +1213,15 @@ def morning_webhook(path_token=None):
         document.raw_payload = payload
         document.last_sync_at = utc_now()
 
-        db.session.commit()
+        payment_result = sync_morning_document_to_payment(
+            document,
+            payload,
+            lead
+        )
+
+db.session.commit()
+
+       
 
         app.logger.warning(
             "MORNING SAVED | document=%s | number=%s | total=%s | lead=%s | matched=%s",
@@ -1079,7 +1240,8 @@ def morning_webhook(path_token=None):
             "document_number": document.document_number,
             "total": float(document.total or 0),
             "lead_id": document.lead_id,
-            "matched_by": document.matched_by
+            "matched_by": document.matched_by,
+            "payment": payment_result
         }), 200
 
     except Exception as exc:
