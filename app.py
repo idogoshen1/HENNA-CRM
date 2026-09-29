@@ -598,8 +598,9 @@ def morning_test():
         }), 502
 
 @app.post("/webhook/morning")
-def morning_webhook():
-    token = request.args.get("token", "")
+@app.post("/webhook/morning/<path_token>")
+def morning_webhook(path_token=None):
+    token = path_token or request.args.get("token", "")
 
     if (
         not MORNING_WEBHOOK_TOKEN
