@@ -182,7 +182,106 @@ class Payment(db.Model):
     document_number = db.Column(db.String(100), default="")
     document_url = db.Column(db.Text, default="")
     last_sync_at = db.Column(db.DateTime(timezone=True), nullable=True)
+class MorningDocument(db.Model):
+    __tablename__ = "morning_documents"
 
+    id = db.Column(db.Integer, primary_key=True)
+
+    morning_document_id = db.Column(
+        db.String(255),
+        unique=True,
+        nullable=False,
+        index=True
+    )
+
+    # קישור לליד שלנו
+    lead_id = db.Column(
+        db.Integer,
+        db.ForeignKey("leads.id"),
+        nullable=True,
+        index=True
+    )
+    matched_by = db.Column(db.String(50), default="")
+
+    # פרטי המסמך
+    business_id = db.Column(db.String(255), default="")
+    business_type = db.Column(db.Integer, nullable=True)
+
+    document_type_code = db.Column(db.Integer, nullable=True)
+    document_number = db.Column(db.String(100), default="")
+    document_date = db.Column(db.Date, nullable=True)
+    created_at_morning = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    currency = db.Column(db.String(10), default="ILS")
+    country = db.Column(db.String(10), default="IL")
+
+    subtotal = db.Column(db.Numeric(12, 2), nullable=True)
+    taxable_total = db.Column(db.Numeric(12, 2), nullable=True)
+    vat_taxable_total = db.Column(db.Numeric(12, 2), nullable=True)
+    revenue_taxable_total = db.Column(db.Numeric(12, 2), nullable=True)
+    exempt_total = db.Column(db.Numeric(12, 2), nullable=True)
+    tax = db.Column(db.Numeric(12, 2), nullable=True)
+    total = db.Column(db.Numeric(12, 2), nullable=True)
+
+    rounding = db.Column(db.Boolean, nullable=True)
+    reverse_charge = db.Column(db.Boolean, nullable=True)
+
+    # תיאור תכולת המסמך / הערות
+    description = db.Column(db.Text, default="")
+    remarks = db.Column(db.Text, default="")
+
+    # פרטי הלקוח
+    morning_client_id = db.Column(db.String(255), default="")
+
+    recipient_name = db.Column(db.String(255), default="")
+    recipient_department = db.Column(db.String(255), default="")
+    recipient_address = db.Column(db.Text, default="")
+    recipient_city = db.Column(db.String(150), default="")
+    recipient_zip = db.Column(db.String(50), default="")
+    recipient_country = db.Column(db.String(10), default="")
+
+    recipient_phone = db.Column(db.String(50), default="")
+    recipient_mobile = db.Column(db.String(50), default="")
+    recipient_email = db.Column(db.String(255), default="")
+    recipient_emails = db.Column(db.JSON, nullable=True)
+
+    # רשימת פריטים מהמסך:
+    # מק"ט / פירוט / כמות / מחיר / מטבע / מע"מ / סה"כ
+    items_json = db.Column(db.JSON, nullable=True)
+
+    # פירוט תקבולים
+    transactions_json = db.Column(db.JSON, nullable=True)
+
+    # מסמכים וקבצים
+    linked_documents_json = db.Column(db.JSON, nullable=True)
+    files_json = db.Column(db.JSON, nullable=True)
+
+    document_url_he = db.Column(db.Text, default="")
+    document_url_en = db.Column(db.Text, default="")
+
+    # שליחה במייל
+    email_recipients = db.Column(db.JSON, nullable=True)
+    email_subject = db.Column(db.String(500), default="")
+    email_body = db.Column(db.Text, default="")
+
+    # מי יצר את המסמך
+    generated_by_id = db.Column(db.String(255), default="")
+    generated_by_name = db.Column(db.String(255), default="")
+
+    # שומרים גם את כל מה שמורנינג שלחה
+    raw_payload = db.Column(db.JSON, nullable=True)
+
+    received_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc)
+    )
+
+    last_sync_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc)
+    )
 
 class FollowUp(db.Model):
     __tablename__ = "followups"
@@ -596,44 +695,406 @@ def morning_test():
             "environment": MORNING_ENV,
             "error": str(exc)[:500],
         }), 502
+def morning_number(value):
+    if value in (None, ""):
+        return None
 
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def morning_date(value):
+    if not value:
+        return None
+
+    try:
+        return datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")
+        ).date()
+    except Exception:
+        return None
+
+
+def morning_datetime(value):
+    if value in (None, ""):
+        return None
+
+    try:
+        text = str(value)
+
+        # Morning שולחת לפעמים timestamp במילישניות
+        if isinstance(value, (int, float)) or text.isdigit():
+            timestamp = float(value)
+
+            if timestamp > 100000000000:
+                timestamp /= 1000
+
+            return datetime.fromtimestamp(
+                timestamp,
+                tz=timezone.utc
+            )
+
+        parsed = datetime.fromisoformat(
+            text.replace("Z", "+00:00")
+        )
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+
+        return parsed.astimezone(timezone.utc)
+
+    except Exception:
+        return None
+
+
+def normalize_phone(value):
+    digits = "".join(
+        x for x in str(value or "")
+        if x.isdigit()
+    )
+
+    if not digits:
+        return ""
+
+    if digits.startswith("00"):
+        digits = digits[2:]
+
+    if digits.startswith("0"):
+        digits = "972" + digits[1:]
+
+    return digits
+
+
+def morning_emails(recipient):
+    emails = recipient.get("emails") or []
+
+    if isinstance(emails, str):
+        emails = [emails]
+
+    return [
+        str(email).strip()
+        for email in emails
+        if str(email).strip()
+    ]
+
+
+def find_morning_lead(recipient):
+    emails = morning_emails(recipient)
+
+    # 1. קודם אימייל
+    for email in emails:
+        lead = Lead.query.filter(
+            db.func.lower(Lead.email) == email.lower()
+        ).first()
+
+        if lead:
+            return lead, "email"
+
+    # 2. אחר כך טלפון
+    phones = {
+        normalize_phone(recipient.get("phone")),
+        normalize_phone(recipient.get("mobile"))
+    }
+
+    phones.discard("")
+
+    if phones:
+        for lead in Lead.query.all():
+            if normalize_phone(lead.phone) in phones:
+                return lead, "phone"
+
+    # 3. שם - רק אם יש ליד אחד כזה
+    name = str(recipient.get("name") or "").strip()
+
+    if name:
+        matches = Lead.query.filter(
+            Lead.customer_name == name
+        ).limit(2).all()
+
+        if len(matches) == 1:
+            return matches[0], "name"
+
+    return None, ""
+    
 @app.post("/webhook/morning")
 @app.post("/webhook/morning/<path_token>")
 def morning_webhook(path_token=None):
+
     token = path_token or request.args.get("token", "")
 
     if (
         not MORNING_WEBHOOK_TOKEN
-        or not hmac.compare_digest(token, MORNING_WEBHOOK_TOKEN)
+        or not hmac.compare_digest(
+            token,
+            MORNING_WEBHOOK_TOKEN
+        )
     ):
         return jsonify({
             "ok": False,
             "error": "Unauthorized"
         }), 401
 
-    raw = request.get_data(cache=True)
-
     payload = request.get_json(silent=True) or {}
 
-    document_id = (
-        payload.get("id")
-        or payload.get("documentId")
-        or (payload.get("document") or {}).get("id")
-    )
+    try:
+        document_id = str(
+            payload.get("id")
+            or payload.get("documentId")
+            or ""
+        )
 
-        # זמני לצורך הבדיקה הראשונה בלבד:
-    # נראה בדיוק איזה מבנה Morning שולחת.
-    app.logger.warning(
-        "MORNING WEBHOOK | document_id=%s | payload=%s",
-        document_id,
-        raw.decode("utf-8", errors="replace")[:4000],
-    )
+        if not document_id:
+            return jsonify({
+                "ok": False,
+                "error": "Missing Morning document id"
+            }), 400
 
-    return jsonify({
-        "ok": True,
-        "received": True,
-        "document_id": document_id,
-    }), 200
+        recipient = payload.get("recipient") or {}
+
+        emails = morning_emails(recipient)
+
+        files = payload.get("files") or {}
+        download_links = files.get("downloadLinks") or {}
+
+        generated_by = payload.get("generatedBy") or {}
+
+        lead, matched_by = find_morning_lead(recipient)
+
+        # אם Morning שולחת אותו webhook שוב,
+        # לא יוצרים כפילות.
+        document = MorningDocument.query.filter_by(
+            morning_document_id=document_id
+        ).first()
+
+        if document is None:
+            document = MorningDocument(
+                morning_document_id=document_id
+            )
+
+            db.session.add(document)
+
+        # שיוך ל-CRM
+        document.lead_id = lead.id if lead else None
+        document.matched_by = matched_by
+
+        # פרטי המסמך
+        document.business_id = str(
+            payload.get("businessId") or ""
+        )
+
+        document.business_type = payload.get("businessType")
+
+        document.document_type_code = payload.get("type")
+
+        document.document_number = str(
+            payload.get("number") or ""
+        )
+
+        document.document_date = morning_date(
+            payload.get("date")
+        )
+
+        document.created_at_morning = morning_datetime(
+            payload.get("createdAt")
+        )
+
+        document.currency = str(
+            payload.get("currency") or "ILS"
+        )
+
+        document.country = str(
+            payload.get("country") or "IL"
+        )
+
+        # סכומים
+        document.subtotal = morning_number(
+            payload.get("subtotal")
+        )
+
+        document.taxable_total = morning_number(
+            payload.get("taxableTotal")
+        )
+
+        document.vat_taxable_total = morning_number(
+            payload.get("vatTaxableTotal")
+        )
+
+        document.revenue_taxable_total = morning_number(
+            payload.get("revenueTaxableTotal")
+        )
+
+        document.exempt_total = morning_number(
+            payload.get("exemptTotal")
+        )
+
+        document.tax = morning_number(
+            payload.get("tax")
+        )
+
+        document.total = morning_number(
+            payload.get("total")
+        )
+
+        document.rounding = payload.get("rounding")
+
+        document.reverse_charge = payload.get(
+            "reverseCharge"
+        )
+
+        # תיאור + הערות
+        document.description = str(
+            payload.get("description") or ""
+        )
+
+        document.remarks = str(
+            payload.get("remarks") or ""
+        )
+
+        # לקוח
+        document.morning_client_id = str(
+            recipient.get("id")
+            or recipient.get("clientId")
+            or payload.get("clientId")
+            or ""
+        )
+
+        document.recipient_name = str(
+            recipient.get("name") or ""
+        )
+
+        document.recipient_department = str(
+            recipient.get("department") or ""
+        )
+
+        document.recipient_address = str(
+            recipient.get("address") or ""
+        )
+
+        document.recipient_city = str(
+            recipient.get("city") or ""
+        )
+
+        document.recipient_zip = str(
+            recipient.get("zip") or ""
+        )
+
+        document.recipient_country = str(
+            recipient.get("country") or ""
+        )
+
+        document.recipient_phone = str(
+            recipient.get("phone") or ""
+        )
+
+        document.recipient_mobile = str(
+            recipient.get("mobile") or ""
+        )
+
+        document.recipient_email = (
+            emails[0]
+            if emails
+            else ""
+        )
+
+        document.recipient_emails = emails
+
+        # רשימת הפריטים
+        document.items_json = (
+            payload.get("items") or []
+        )
+
+        # פירוט התקבולים
+        document.transactions_json = (
+            payload.get("transactions") or []
+        )
+
+        # מסמכים מקושרים
+        document.linked_documents_json = (
+            payload.get("linkedDocuments") or []
+        )
+
+        # קבצים וקישורים
+        document.files_json = files
+
+        document.document_url_he = str(
+            download_links.get("he") or ""
+        )
+
+        document.document_url_en = str(
+            download_links.get("en") or ""
+        )
+
+        # שליחה במייל
+        email_recipients = (
+            payload.get("emailRecipients")
+            or emails
+        )
+
+        if isinstance(email_recipients, str):
+            email_recipients = [email_recipients]
+
+        document.email_recipients = (
+            email_recipients or []
+        )
+
+        document.email_subject = str(
+            payload.get("emailSubject") or ""
+        )
+
+        document.email_body = str(
+            payload.get("emailBody") or ""
+        )
+
+        # מי יצר
+        document.generated_by_id = str(
+            generated_by.get("id") or ""
+        )
+
+        document.generated_by_name = str(
+            generated_by.get("name") or ""
+        )
+
+        # גיבוי מלא
+        document.raw_payload = payload
+        document.last_sync_at = utc_now()
+
+        db.session.commit()
+
+        app.logger.warning(
+            "MORNING SAVED | document=%s | number=%s | total=%s | lead=%s | matched=%s",
+            document.morning_document_id,
+            document.document_number,
+            document.total,
+            document.lead_id,
+            document.matched_by
+        )
+
+        return jsonify({
+            "ok": True,
+            "received": True,
+            "saved": True,
+            "document_id": document.morning_document_id,
+            "document_number": document.document_number,
+            "total": float(document.total or 0),
+            "lead_id": document.lead_id,
+            "matched_by": document.matched_by
+        }), 200
+
+    except Exception as exc:
+        db.session.rollback()
+
+        app.logger.exception(
+            "Morning webhook save failed"
+        )
+
+        return jsonify({
+            "ok": False,
+            "received": True,
+            "saved": False,
+            "error": str(exc)[:500]
+        }), 503
         
 @app.post("/api/test-email")
 @admin_required
@@ -919,7 +1380,91 @@ def update_lead(lead_id):
     lead.updated_at = utc_now()
     db.session.commit()
     return jsonify(lead_to_dict(lead))
+    
+@app.get("/api/morning/documents")
+@admin_required
+def api_morning_documents():
 
+    documents = (
+        MorningDocument.query
+        .order_by(MorningDocument.received_at.desc())
+        .all()
+    )
+
+    items = []
+
+    for document in documents:
+        lead = (
+            db.session.get(Lead, document.lead_id)
+            if document.lead_id
+            else None
+        )
+
+        items.append({
+            "id": document.id,
+
+            "morning_document_id":
+                document.morning_document_id,
+
+            "document_type_code":
+                document.document_type_code,
+
+            "document_number":
+                document.document_number,
+
+            "document_date":
+                document.document_date.isoformat()
+                if document.document_date
+                else None,
+
+            "total":
+                float(document.total or 0),
+
+            "currency":
+                document.currency,
+
+            "recipient_name":
+                document.recipient_name,
+
+            "recipient_email":
+                document.recipient_email,
+
+            "recipient_phone":
+                document.recipient_phone,
+
+            "recipient_mobile":
+                document.recipient_mobile,
+
+            "items":
+                document.items_json or [],
+
+            "transactions":
+                document.transactions_json or [],
+
+            "document_url":
+                document.document_url_he,
+
+            "lead_id":
+                document.lead_id,
+
+            "lead_uid":
+                lead.lead_uid if lead else "",
+
+            "matched_by":
+                document.matched_by,
+
+            "description":
+                document.description,
+
+            "remarks":
+                document.remarks
+        })
+
+    return jsonify({
+        "total": len(items),
+        "items": items
+    })
+    
 @app.get("/api/payments")
 @admin_required
 def api_payments():
