@@ -43,6 +43,7 @@ EMAIL_FROM = os.getenv("EMAIL_FROM", "Olam HaHina <onboarding@resend.dev>")
 MORNING_API_KEY_ID = os.getenv("MORNING_API_KEY_ID", "")
 MORNING_API_KEY_SECRET = os.getenv("MORNING_API_KEY_SECRET", "")
 MORNING_ENV = os.getenv("MORNING_ENV", "production").strip().lower()
+MORNING_WEBHOOK_TOKEN = os.getenv("MORNING_WEBHOOK_TOKEN", "")
 
 TZ = ZoneInfo(TIMEZONE_NAME)
 
@@ -595,6 +596,43 @@ def morning_test():
             "environment": MORNING_ENV,
             "error": str(exc)[:500],
         }), 502
+
+@app.post("/webhook/morning")
+def morning_webhook():
+    token = request.args.get("token", "")
+
+    if (
+        not MORNING_WEBHOOK_TOKEN
+        or not hmac.compare_digest(token, MORNING_WEBHOOK_TOKEN)
+    ):
+        return jsonify({
+            "ok": False,
+            "error": "Unauthorized"
+        }), 401
+
+    raw = request.get_data(cache=True)
+
+    payload = request.get_json(silent=True) or {}
+
+    document_id = (
+        payload.get("id")
+        or payload.get("documentId")
+        or (payload.get("document") or {}).get("id")
+    )
+
+    # זמני לצורך הבדיקה הראשונה בלבד:
+    # נראה בדיוק איזה מבנה Morning שולחת.
+    app.logger.info(
+        "MORNING WEBHOOK | document_id=%s | payload=%s",
+        document_id,
+        raw.decode("utf-8", errors="replace")[:4000],
+    )
+
+    return jsonify({
+        "ok": True,
+        "received": True,
+        "document_id": document_id,
+    }), 200
         
 @app.post("/api/test-email")
 @admin_required
