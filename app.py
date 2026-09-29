@@ -40,6 +40,9 @@ DEFAULT_PRIORITY = os.getenv("DEFAULT_PRIORITY", "בינונית")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 ALERT_EMAIL = os.getenv("ALERT_EMAIL", "")
 EMAIL_FROM = os.getenv("EMAIL_FROM", "Olam HaHina <onboarding@resend.dev>")
+MORNING_API_KEY_ID = os.getenv("MORNING_API_KEY_ID", "")
+MORNING_API_KEY_SECRET = os.getenv("MORNING_API_KEY_SECRET", "")
+MORNING_ENV = os.getenv("MORNING_ENV", "production").strip().lower()
 
 TZ = ZoneInfo(TIMEZONE_NAME)
 
@@ -487,7 +490,40 @@ def process_message(phone, name, message):
         "email_alert": email_alert,
     }
 
+def morning_access_token():
+    if not MORNING_API_KEY_ID or not MORNING_API_KEY_SECRET:
+        raise RuntimeError("Morning API credentials are not configured")
 
+    if MORNING_ENV == "sandbox":
+        token_url = "https://api.sandbox.morning.dev/idp/v1/oauth/token"
+    else:
+        token_url = "https://api.morning.co/idp/v1/oauth/token"
+
+    response = requests.post(
+        token_url,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
+        data={
+            "grant_type": "client_credentials",
+            "client_id": MORNING_API_KEY_ID,
+            "client_secret": MORNING_API_KEY_SECRET,
+        },
+        timeout=10,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    token = data.get("accessToken") or data.get("access_token")
+
+    if not token:
+        raise RuntimeError(
+            "Morning authentication succeeded but no access token was returned"
+        )
+
+    return token
 def admin_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -499,7 +535,41 @@ def admin_required(fn):
         return fn(*args, **kwargs)
     return wrapper
 
+@app.post("/api/morning/test")
+@admin_required
+def morning_test():
+    try:
+        morning_access_token()
 
+        return jsonify({
+            "ok": True,
+            "authenticated": True,
+            "environment": MORNING_ENV,
+            "message": "Morning API authentication successful",
+        })
+
+    except requests.HTTPError as exc:
+        body = (
+            exc.response.text[:500]
+            if exc.response is not None
+            else str(exc)
+        )
+
+        return jsonify({
+            "ok": False,
+            "authenticated": False,
+            "environment": MORNING_ENV,
+            "error": body,
+        }), 400
+
+    except Exception as exc:
+        return jsonify({
+            "ok": False,
+            "authenticated": False,
+            "environment": MORNING_ENV,
+            "error": str(exc)[:500],
+        }), 502
+        
 @app.post("/api/test-email")
 @admin_required
 def test_email():
