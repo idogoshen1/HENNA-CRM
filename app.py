@@ -153,11 +153,34 @@ class Payment(db.Model):
     __tablename__ = "payments"
 
     id = db.Column(db.Integer, primary_key=True)
-    lead_id = db.Column(db.Integer, db.ForeignKey("leads.id"), nullable=False, index=True)
-    paid_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    payment_uid = db.Column(db.String(80), unique=True, nullable=True, index=True)
+
+    lead_id = db.Column(
+        db.Integer,
+        db.ForeignKey("leads.id"),
+        nullable=False,
+        index=True
+    )
+
+    paid_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc)
+    )
+
+    payment_type = db.Column(db.String(100), default="")
     amount = db.Column(db.Numeric(12, 2), nullable=False)
     method = db.Column(db.String(100), default="")
+    reference = db.Column(db.String(255), default="")
+    status = db.Column(db.String(50), default="שולם")
     note = db.Column(db.Text, default="")
+
+    morning_payment_id = db.Column(db.String(255), default="")
+    morning_document_id = db.Column(db.String(255), default="")
+    document_type = db.Column(db.String(100), default="")
+    document_number = db.Column(db.String(100), default="")
+    document_url = db.Column(db.Text, default="")
+    last_sync_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
 
 class FollowUp(db.Model):
@@ -318,7 +341,10 @@ def active_campaign_lead(phone, received_at):
 def new_lead_uid(received_at):
     return "LEAD-" + received_at.astimezone(TZ).strftime("%Y%m%d-%H%M%S-%f")
 
-
+def new_payment_uid():
+    now = datetime.now(TZ)
+    return "PAY-" + now.strftime("%Y%m%d-%H%M%S-%f")
+    
 def send_new_lead_email(lead):
     """Send a best-effort email alert for a newly created campaign lead.
 
@@ -747,7 +773,32 @@ def webhook():
         # Non-2xx lets Meta know this delivery was not processed successfully.
         return jsonify({"received": False, "error": str(exc)}), 503
 
+def payment_to_dict(payment):
+    lead = payment.lead
 
+    return {
+        "id": payment.id,
+        "payment_uid": payment.payment_uid,
+        "lead_id": payment.lead_id,
+        "lead_uid": lead.lead_uid if lead else "",
+        "customer_name": lead.customer_name if lead else "",
+
+        "paid_at": local_iso(payment.paid_at),
+        "payment_type": payment.payment_type,
+        "amount": float(payment.amount or 0),
+        "method": payment.method,
+        "reference": payment.reference,
+        "status": payment.status,
+        "note": payment.note,
+
+        "morning_payment_id": payment.morning_payment_id,
+        "morning_document_id": payment.morning_document_id,
+        "document_type": payment.document_type,
+        "document_number": payment.document_number,
+        "document_url": payment.document_url,
+        "last_sync_at": local_iso(payment.last_sync_at),
+    }
+    
 @app.get("/api/leads")
 @admin_required
 def api_leads():
@@ -830,22 +881,69 @@ def update_lead(lead_id):
     db.session.commit()
     return jsonify(lead_to_dict(lead))
 
+@app.get("/api/payments")
+@admin_required
+def api_payments():
+    payments = (
+        Payment.query
+        .order_by(Payment.paid_at.desc())
+        .all()
+    )
 
+    return jsonify({
+        "total": len(payments),
+        "items": [payment_to_dict(p) for p in payments],
+    })
+    
 @app.post("/api/leads/<int:lead_id>/payments")
 @admin_required
 def add_payment(lead_id):
     lead = db.get_or_404(Lead, lead_id)
     body = request.get_json(silent=True) or {}
+
+    if "amount" not in body:
+        return jsonify({
+            "ok": False,
+            "error": "amount is required"
+        }), 400
+
+    paid_at = utc_now()
+
+    if body.get("paid_at"):
+        parsed = datetime.fromisoformat(body["paid_at"])
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=TZ)
+
+        paid_at = parsed.astimezone(timezone.utc)
+
     payment = Payment(
+        payment_uid=new_payment_uid(),
         lead_id=lead.id,
+        paid_at=paid_at,
+
+        payment_type=body.get("payment_type", ""),
         amount=body["amount"],
         method=body.get("method", ""),
+        reference=body.get("reference", ""),
+        status=body.get("status", "שולם"),
         note=body.get("note", ""),
+
+        morning_payment_id=body.get("morning_payment_id", ""),
+        morning_document_id=body.get("morning_document_id", ""),
+        document_type=body.get("document_type", ""),
+        document_number=body.get("document_number", ""),
+        document_url=body.get("document_url", ""),
+        last_sync_at=utc_now(),
     )
+
     db.session.add(payment)
     db.session.commit()
-    return jsonify({"ok": True, "payment_id": payment.id}), 201
 
+    return jsonify({
+        "ok": True,
+        "payment": payment_to_dict(payment)
+    }), 201
 
 @app.post("/api/leads/<int:lead_id>/followups")
 @admin_required
@@ -933,10 +1031,31 @@ def export_xlsx():
         download_name="Henna_CRM_Export.xlsx",
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+def migrate_payments_table():
+    if db.engine.dialect.name != "postgresql":
+        return
 
+    statements = [
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_uid VARCHAR(80)",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_type VARCHAR(100) DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS reference VARCHAR(255) DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'שולם'",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS morning_payment_id VARCHAR(255) DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS morning_document_id VARCHAR(255) DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS document_type VARCHAR(100) DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS document_number VARCHAR(100) DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS document_url TEXT DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS last_sync_at TIMESTAMPTZ",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_payments_payment_uid ON payments (payment_uid)"
+    ]
+
+with db.engine.begin() as conn:
+    for statement in statements:
+        conn.execute(db.text(statement))
 
 with app.app_context():
     db.create_all()
+    migrate_payments_table()
 
 
 if __name__ == "__main__":
