@@ -1451,6 +1451,62 @@ def webhook():
 def payment_to_dict(payment):
     lead = payment.lead
 
+    morning_document = None
+
+    if payment.morning_document_id:
+        morning_document = MorningDocument.query.filter_by(
+            morning_document_id=payment.morning_document_id
+        ).first()
+
+    country = ""
+    payment_terms = ""
+
+    if morning_document:
+        country = (
+            morning_document.recipient_country
+            or morning_document.country
+            or ""
+        )
+
+        raw = morning_document.raw_payload or {}
+
+        payment_terms_value = (
+            raw.get("paymentTerms")
+            or raw.get("payment_terms")
+            or ""
+        )
+
+        if str(payment_terms_value) == "-1":
+            payment_terms = "מיידי"
+        elif payment_terms_value not in (None, ""):
+            payment_terms = f"נטו {payment_terms_value}"
+
+    return {
+        "id": payment.id,
+        "payment_uid": payment.payment_uid,
+        "lead_id": payment.lead_id,
+        "lead_uid": lead.lead_uid if lead else "",
+        "customer_name": lead.customer_name if lead else "",
+
+        "paid_at": local_iso(payment.paid_at),
+        "payment_type": payment.payment_type,
+        "amount": float(payment.amount or 0),
+        "method": payment.method,
+        "reference": payment.reference,
+        "status": payment.status,
+        "note": payment.note,
+
+        "morning_payment_id": payment.morning_payment_id,
+        "morning_document_id": payment.morning_document_id,
+        "document_type": payment.document_type,
+        "document_number": payment.document_number,
+        "document_url": payment.document_url,
+        "last_sync_at": local_iso(payment.last_sync_at),
+
+        "payment_terms": payment_terms,
+        "country": country,
+    }
+
     return {
         "id": payment.id,
         "payment_uid": payment.payment_uid,
