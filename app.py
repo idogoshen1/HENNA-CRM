@@ -987,127 +987,6 @@ def merge_morning_transactions(existing, incoming):
     return result
 
 
-def morning_payment_method_name(transaction):
-    payment_codes = {
-        -1: "לא שולם",
-        0: "ניכוי במקור",
-        1: "מזומן",
-        2: "המחאה",
-        3: "כרטיס אשראי",
-        4: "העברה בנקאית",
-        5: "PayPal",
-        10: "אפליקציית תשלום",
-        11: "אחר",
-    }
-
-    app_codes = {
-        1: "Bit",
-        2: "Pay",
-        3: "PayBox",
-        5: "Google Pay",
-        6: "Apple Pay",
-    }
-
-    card_codes = {
-        0: "",
-        1: "ישראכרט",
-        2: "Visa",
-        3: "Mastercard",
-        4: "American Express",
-        5: "Diners",
-    }
-
-    if not isinstance(transaction, dict):
-        transaction = {"type": transaction}
-
-    payment_code = None
-
-    for value in (
-        transaction.get("paymentType"),
-        transaction.get("type"),
-        transaction.get("method"),
-        transaction.get("paymentMethod"),
-    ):
-        if isinstance(value, dict):
-            value = (
-                value.get("type")
-                or value.get("code")
-                or value.get("id")
-                or value.get("name")
-            )
-
-        try:
-            number = int(value)
-        except (TypeError, ValueError):
-            continue
-
-        if number in payment_codes:
-            payment_code = number
-            break
-
-    if payment_code == 10:
-        try:
-            app_type = int(
-                transaction.get("appType")
-                or transaction.get("paymentAppType")
-            )
-        except (TypeError, ValueError):
-            app_type = None
-
-        return app_codes.get(app_type, "אפליקציית תשלום")
-
-    if payment_code == 3:
-        brand = ""
-
-        for key in ("cardType", "creditCardType"):
-            try:
-                card_type = int(transaction.get(key))
-            except (TypeError, ValueError):
-                continue
-
-            brand = card_codes.get(card_type, "")
-            if brand:
-                break
-
-        if brand:
-            return f"כרטיס אשראי - {brand}"
-
-        return "כרטיס אשראי"
-
-    if payment_code is not None:
-        return payment_codes[payment_code]
-
-    values = " ".join(
-        str(value or "")
-        for value in transaction.values()
-    ).lower()
-
-    if "bit" in values:
-        return "Bit"
-    if "paybox" in values:
-        return "PayBox"
-    if "google pay" in values:
-        return "Google Pay"
-    if "apple pay" in values:
-        return "Apple Pay"
-    if "bank" in values or "transfer" in values:
-        return "העברה בנקאית"
-    if "cash" in values:
-        return "מזומן"
-    if "check" in values or "cheque" in values:
-        return "המחאה"
-    if "credit" in values or "card" in values:
-        return "כרטיס אשראי"
-    if "paypal" in values:
-        return "PayPal"
-
-    for key in ("name", "label", "description"):
-        value = transaction.get(key)
-
-        if value not in (None, ""):
-            return str(value)
-
-    return ""
 
 
 def morning_transaction_reference(transaction):
@@ -1195,19 +1074,17 @@ def morning_transaction_datetime(transaction):
 
 def morning_payment_terms(payload):
     """
-    Morning uses -1 for immediate and 0/10/15/30/... for current + N.
+    מחזיר תנאי תשלום בעברית מ-Morning.
+    דוגמאות: מיידי, שוטף, שוטף + 30, לתשלום עד 31/10/2026.
     """
     if not isinstance(payload, dict):
         return ""
 
     containers = [
         payload,
-        payload.get("recipient")
-        if isinstance(payload.get("recipient"), dict)
-        else {},
-        payload.get("client")
-        if isinstance(payload.get("client"), dict)
-        else {},
+        payload.get("data") if isinstance(payload.get("data"), dict) else {},
+        payload.get("recipient") if isinstance(payload.get("recipient"), dict) else {},
+        payload.get("client") if isinstance(payload.get("client"), dict) else {},
     ]
 
     value = None
@@ -1216,6 +1093,8 @@ def morning_payment_terms(payload):
         for key in (
             "paymentTerms",
             "payment_terms",
+            "paymentTerm",
+            "terms",
             "paymentTermsDays",
             "payment_terms_days",
             "dueDays",
@@ -1227,9 +1106,6 @@ def morning_payment_terms(payload):
         if value not in (None, ""):
             break
 
-    if value in (None, ""):
-        return ""
-
     if isinstance(value, dict):
         for key in (
             "name",
@@ -1238,46 +1114,136 @@ def morning_payment_terms(payload):
             "days",
             "value",
             "code",
+            "paymentTerms",
         ):
             nested = value.get(key)
-
             if nested not in (None, ""):
                 value = nested
                 break
         else:
-            return str(value)
+            value = ""
 
-    text = str(value).strip()
+    if value not in (None, ""):
+        raw_text = str(value).strip()
+        lower_text = raw_text.lower()
 
-    try:
-        days = int(float(text))
-    except (TypeError, ValueError):
-        return text
+        text_map = {
+            "immediate": "מיידי",
+            "now": "מיידי",
+            "cash": "מיידי",
+            "current": "שוטף",
+            "current month": "שוטף",
+            "eom": "שוטף",
+        }
 
-    if days < 0:
-        return "מיידי"
+        if lower_text in text_map:
+            return text_map[lower_text]
 
-    if days == 0:
-        return "שוטף"
+        # אם Morning כבר שולחת טקסט בעברית, נשמור אותו.
+        if any("\u0590" <= ch <= "\u05ff" for ch in raw_text):
+            return raw_text
 
-    return f"שוטף + {days}"
+        try:
+            days = int(float(raw_text))
+        except (TypeError, ValueError):
+            return raw_text
+
+        if days < 0:
+            return "מיידי"
+
+        if days == 0:
+            return "שוטף"
+
+        return f"שוטף + {days}"
+
+    # לפעמים Morning שולחת רק תאריך מסמך + תאריך יעד.
+    document_date = morning_date(payload.get("date"))
+    due_date = morning_date(
+        payload.get("dueDate")
+        or payload.get("due_date")
+    )
+
+    if due_date:
+        if document_date:
+            if due_date == document_date:
+                return "מיידי"
+
+            next_month = (
+                document_date.replace(day=28)
+                + timedelta(days=4)
+            ).replace(day=1)
+
+            month_end = next_month - timedelta(days=1)
+
+            if due_date == month_end:
+                return "שוטף"
+
+            days_after_month = (due_date - month_end).days
+
+            if days_after_month in (
+                10, 15, 30, 45, 60, 75, 90, 120
+            ):
+                return f"שוטף + {days_after_month}"
+
+        return f"לתשלום עד {due_date.strftime('%d/%m/%Y')}"
+
+    return ""
     
 def morning_payment_method_name(transaction):
-    # קודם ננסה שם מפורש שמגיע מ-Morning
+    """
+    מחזיר את אמצעי התשלום של Morning בעברית ככל האפשר.
+    שמות המפתחות ב-API נשארים ללא שינוי כדי לא לשבור את הסנכרון.
+    """
+    if not isinstance(transaction, dict):
+        transaction = {"type": transaction}
+
+    # שם מפורש שמגיע מ-Morning.
     raw_method = (
         transaction.get("method")
         or transaction.get("methodName")
         or transaction.get("paymentMethod")
+        or transaction.get("name")
+        or transaction.get("label")
         or ""
     )
 
     raw_text = str(raw_method).strip()
+    lower = raw_text.lower()
 
-    # "default" לא נותן לנו מידע שימושי
-    if raw_text and raw_text.lower() not in ("default", "unknown"):
-        # אם זה כבר שם ולא מספר - נשמור אותו כמו שהוא
-        if not raw_text.lstrip("-").isdigit():
-            return raw_text
+    english_names = {
+        "cash": "מזומן",
+        "cash payment": "מזומן",
+        "check": "צ'ק",
+        "cheque": "צ'ק",
+        "credit": "כרטיס אשראי",
+        "credit card": "כרטיס אשראי",
+        "card": "כרטיס אשראי",
+        "bank": "העברה בנקאית",
+        "bank transfer": "העברה בנקאית",
+        "wire transfer": "העברה בנקאית",
+        "transfer": "העברה בנקאית",
+        "paypal": "פייפאל",
+        "bit": "Bit",
+        "paybox": "PayBox",
+        "google pay": "Google Pay",
+        "apple pay": "Apple Pay",
+        "other": "אחר",
+        "withholding": "ניכוי במקור",
+        "withholding tax": "ניכוי במקור",
+        "not paid": "לא שולם",
+        "unpaid": "לא שולם",
+    }
+
+    if lower in english_names:
+        return english_names[lower]
+
+    # טקסט עברי מפורש נשמר כפי שהוא.
+    if raw_text and any("\u0590" <= ch <= "\u05ff" for ch in raw_text):
+        return raw_text
+
+    # default/unknown אינם אמצעי תשלום שימושיים.
+    if lower in ("default", "unknown", "none", "null"):
+        raw_text = ""
 
     raw_type = (
         transaction.get("type")
@@ -1288,14 +1254,42 @@ def morning_payment_method_name(transaction):
     try:
         type_code = int(raw_type)
     except (TypeError, ValueError):
-        return raw_text if raw_text.lower() != "default" else ""
+        # אם לא קיבלנו קוד, ננסה להבין מהטקסטים האחרים.
+        all_values = " ".join(
+            str(value or "")
+            for value in transaction.values()
+        ).lower()
 
-    # אפליקציות תשלום
+        keyword_map = (
+            ("paybox", "PayBox"),
+            ("google pay", "Google Pay"),
+            ("apple pay", "Apple Pay"),
+            ("paypal", "פייפאל"),
+            ("bit", "Bit"),
+            ("bank transfer", "העברה בנקאית"),
+            ("wire transfer", "העברה בנקאית"),
+            ("transfer", "העברה בנקאית"),
+            ("cash", "מזומן"),
+            ("cheque", "צ'ק"),
+            ("check", "צ'ק"),
+            ("credit card", "כרטיס אשראי"),
+            ("credit", "כרטיס אשראי"),
+            ("card", "כרטיס אשראי"),
+        )
+
+        for needle, hebrew_name in keyword_map:
+            if needle in all_values:
+                return hebrew_name
+
+        return raw_text
+
+    # אפליקציות תשלום.
     if type_code == 10:
-        app_type = transaction.get("appType")
-
         try:
-            app_type = int(app_type)
+            app_type = int(
+                transaction.get("appType")
+                or transaction.get("paymentAppType")
+            )
         except (TypeError, ValueError):
             app_type = None
 
@@ -1310,6 +1304,7 @@ def morning_payment_method_name(transaction):
         return apps.get(app_type, "אפליקציית תשלום")
 
     methods = {
+        -1: "לא שולם",
         0: "ניכוי במקור",
         1: "מזומן",
         2: "צ'ק",
@@ -1319,7 +1314,30 @@ def morning_payment_method_name(transaction):
         11: "אחר",
     }
 
-    return methods.get(type_code, raw_text or f"אמצעי תשלום {type_code}")
+    result = methods.get(type_code)
+
+    if result == "כרטיס אשראי":
+        try:
+            card_type = int(
+                transaction.get("cardType")
+                or transaction.get("creditCardType")
+            )
+        except (TypeError, ValueError):
+            card_type = None
+
+        card_names = {
+            1: "ישראכרט",
+            2: "Visa",
+            3: "Mastercard",
+            4: "American Express",
+            5: "Diners",
+        }
+
+        card_name = card_names.get(card_type, "")
+        if card_name:
+            return f"כרטיס אשראי - {card_name}"
+
+    return result or raw_text or f"אמצעי תשלום {type_code}"
 
 def sync_morning_document_to_payment(document, payload, lead):
     """
