@@ -1174,7 +1174,7 @@ def morning_webhook(path_token=None):
             payload.get("transactions")
             or payload.get("payment")
             or []
-       }  
+        ) 
 
         # מסמכים מקושרים
         document.linked_documents_json = (
