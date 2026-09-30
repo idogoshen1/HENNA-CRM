@@ -182,6 +182,9 @@ class Payment(db.Model):
     document_type = db.Column(db.String(100), default="")
     document_number = db.Column(db.String(100), default="")
     document_url = db.Column(db.Text, default="")
+    payment_terms = db.Column(db.Integer, nullable=True)
+    payment_terms_text = db.Column(db.String(50), default="")
+    due_date = db.Column(db.Date, nullable=True)
     last_sync_at = db.Column(db.DateTime(timezone=True), nullable=True)
 class MorningDocument(db.Model):
     __tablename__ = "morning_documents"
@@ -211,6 +214,9 @@ class MorningDocument(db.Model):
     document_type_code = db.Column(db.Integer, nullable=True)
     document_number = db.Column(db.String(100), default="")
     document_date = db.Column(db.Date, nullable=True)
+    payment_terms = db.Column(db.Integer, nullable=True)
+    payment_terms_text = db.Column(db.String(50), default="")
+    due_date = db.Column(db.Date, nullable=True)
     created_at_morning = db.Column(db.DateTime(timezone=True), nullable=True)
 
     currency = db.Column(db.String(10), default="ILS")
@@ -1004,7 +1010,27 @@ def morning_transaction_datetime(transaction):
             return None
 
     return morning_datetime(value)
+    
+def morning_payment_terms_name(value):
+    names = {
+        -1: "מיידי",
+        0: "שוטף",
+        10: "שוטף+10",
+        15: "שוטף+15",
+        30: "שוטף+30",
+        45: "שוטף+45",
+        60: "שוטף+60",
+        75: "שוטף+75",
+        90: "שוטף+90",
+        120: "שוטף+120",
+    }
 
+    try:
+        code = int(value)
+    except (TypeError, ValueError):
+        return ""
+
+    return names.get(code, str(code))
 
 def sync_morning_document_to_payment(document, payload, lead):
     """
@@ -1112,6 +1138,10 @@ def sync_morning_document_to_payment(document, payload, lead):
         or document.document_url_en
         or ""
     )
+    
+    payment.payment_terms = document.payment_terms
+    payment.payment_terms_text = document.payment_terms_text
+    payment.due_date = document.due_date
     payment.last_sync_at = utc_now()
     payment.paid_at = (
         transaction_dates[0]
@@ -1212,6 +1242,25 @@ def morning_webhook(path_token=None):
         document.document_date = morning_date(
             payload.get("date")
         )
+        raw_payment_terms = (
+    payload.get("paymentTerms")
+    if payload.get("paymentTerms") not in (None, "")
+    else recipient.get("paymentTerms")
+)
+
+try:
+    document.payment_terms = int(raw_payment_terms)
+except (TypeError, ValueError):
+    document.payment_terms = None
+
+document.payment_terms_text = morning_payment_terms_name(
+    document.payment_terms
+)
+
+document.due_date = morning_date(
+    payload.get("dueDate")
+)
+        
 
         document.created_at_morning = morning_datetime(
             payload.get("createdAt")
@@ -1598,6 +1647,9 @@ def webhook():
         return jsonify({"received": False, "error": str(exc)}), 503
 
 def payment_to_dict(payment):
+    "payment_terms": payment.payment_terms,
+    "payment_terms_text": payment.payment_terms_text,
+    "due_date": payment.due_date.isoformat() if payment.due_date else None,
     lead = payment.lead
 
     morning_document = None
@@ -1979,6 +2031,12 @@ def migrate_payments_table():
         return
 
     statements = [
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_terms INTEGER",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_terms_text VARCHAR(50) DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS due_date DATE",
+        "ALTER TABLE morning_documents ADD COLUMN IF NOT EXISTS payment_terms INTEGER",
+        "ALTER TABLE morning_documents ADD COLUMN IF NOT EXISTS payment_terms_text VARCHAR(50) DEFAULT ''",
+        "ALTER TABLE morning_documents ADD COLUMN IF NOT EXISTS due_date DATE",
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_uid VARCHAR(80)",
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_type VARCHAR(100) DEFAULT ''",
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS reference VARCHAR(255) DEFAULT ''",
