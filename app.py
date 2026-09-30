@@ -173,6 +173,7 @@ class Payment(db.Model):
     payment_type = db.Column(db.String(100), default="")
     amount = db.Column(db.Numeric(12, 2), nullable=False)
     method = db.Column(db.String(100), default="")
+    payment_terms = db.Column(db.String(100), default="")
     reference = db.Column(db.String(255), default="")
     status = db.Column(db.String(50), default="שולם")
     note = db.Column(db.Text, default="")
@@ -852,6 +853,35 @@ def morning_transactions(payload):
     if not transactions:
         transactions = payload.get("payment")
 
+    # Some Morning payloads expose payment details directly at the
+    # document level rather than inside transactions/payment.
+    if not transactions:
+        direct_payment = {}
+        for key in (
+            "paymentType",
+            "paymentMethod",
+            "method",
+            "appType",
+            "reference",
+            "referenceNumber",
+            "transactionId",
+            "confirmationNumber",
+            "checkNumber",
+            "dealId",
+            "amount",
+            "price",
+            "total",
+            "sum",
+            "paidAt",
+            "date",
+            "createdAt",
+        ):
+            if payload.get(key) not in (None, ""):
+                direct_payment[key] = payload.get(key)
+
+        if direct_payment:
+            transactions = [direct_payment]
+
     if isinstance(transactions, dict):
         transactions = [transactions]
 
@@ -1006,6 +1036,54 @@ def morning_transaction_datetime(transaction):
     return morning_datetime(value)
 
 
+
+def morning_payment_terms(payload):
+    """
+    Return a human-readable Morning payment-terms value.
+    """
+    if not isinstance(payload, dict):
+        return ""
+
+    value = None
+    for key in (
+        "paymentTerms",
+        "payment_terms",
+        "paymentTermsDays",
+        "payment_terms_days",
+        "dueDays",
+    ):
+        if payload.get(key) not in (None, ""):
+            value = payload.get(key)
+            break
+
+    if value in (None, ""):
+        return ""
+
+    if isinstance(value, dict):
+        for key in ("name", "label", "description", "days", "value", "code"):
+            nested = value.get(key)
+            if nested not in (None, ""):
+                value = nested
+                break
+        else:
+            return str(value)
+
+    text = str(value).strip()
+
+    if text == "-1":
+        return "מיידי"
+
+    try:
+        days = int(float(text))
+    except (TypeError, ValueError):
+        return text
+
+    if days < 0:
+        return "מיידי"
+
+    return f"נטו {days}"
+
+
 def sync_morning_document_to_payment(document, payload, lead):
     """
     Create/update one CRM Payment for a Morning payment document.
@@ -1090,6 +1168,7 @@ def sync_morning_document_to_payment(document, payload, lead):
         document.document_type_code
     )
     payment.method = " / ".join(methods)
+    payment.payment_terms = morning_payment_terms(payload)
     payment.reference = " / ".join(references)
     payment.status = "שולם"
     payment.note = (
@@ -1126,6 +1205,7 @@ def sync_morning_document_to_payment(document, payload, lead):
         "amount": float(payment.amount or 0),
         "document_number": payment.document_number,
         "method": payment.method,
+        "payment_terms": payment.payment_terms,
     }
 
 
@@ -1607,7 +1687,7 @@ def payment_to_dict(payment):
         ).first()
 
     country = ""
-    payment_terms = ""
+    payment_terms = payment.payment_terms or ""
 
     if morning_document:
         country = (
@@ -1616,17 +1696,10 @@ def payment_to_dict(payment):
             or ""
         )
 
-        raw = morning_document.raw_payload or {}
-
-        if "paymentTerms" in raw:
-            payment_terms_value = raw.get("paymentTerms")
-        else:
-            payment_terms_value = raw.get("payment_terms")
-
-        if str(payment_terms_value) == "-1":
-            payment_terms = "מיידי"
-        elif payment_terms_value not in (None, ""):
-            payment_terms = f"נטו {payment_terms_value}"
+        if not payment_terms:
+            payment_terms = morning_payment_terms(
+                morning_document.raw_payload or {}
+            )
 
     return {
         "id": payment.id,
@@ -1866,6 +1939,7 @@ def add_payment(lead_id):
         payment_type=body.get("payment_type", ""),
         amount=body["amount"],
         method=body.get("method", ""),
+        payment_terms=body.get("payment_terms", ""),
         reference=body.get("reference", ""),
         status=body.get("status", "שולם"),
         note=body.get("note", ""),
@@ -1981,6 +2055,7 @@ def migrate_payments_table():
     statements = [
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_uid VARCHAR(80)",
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_type VARCHAR(100) DEFAULT ''",
+        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_terms VARCHAR(100) DEFAULT ''",
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS reference VARCHAR(255) DEFAULT ''",
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'שולם'",
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS morning_payment_id VARCHAR(255) DEFAULT ''",
