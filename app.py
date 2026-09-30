@@ -3,7 +3,6 @@ import hmac
 import hashlib
 import html
 import io
-import re
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from zoneinfo import ZoneInfo
@@ -182,9 +181,6 @@ class Payment(db.Model):
     document_type = db.Column(db.String(100), default="")
     document_number = db.Column(db.String(100), default="")
     document_url = db.Column(db.Text, default="")
-    payment_terms = db.Column(db.Integer, nullable=True)
-    payment_terms_text = db.Column(db.String(50), default="")
-    due_date = db.Column(db.Date, nullable=True)
     last_sync_at = db.Column(db.DateTime(timezone=True), nullable=True)
 class MorningDocument(db.Model):
     __tablename__ = "morning_documents"
@@ -214,9 +210,6 @@ class MorningDocument(db.Model):
     document_type_code = db.Column(db.Integer, nullable=True)
     document_number = db.Column(db.String(100), default="")
     document_date = db.Column(db.Date, nullable=True)
-    payment_terms = db.Column(db.Integer, nullable=True)
-    payment_terms_text = db.Column(db.String(50), default="")
-    due_date = db.Column(db.Date, nullable=True)
     created_at_morning = db.Column(db.DateTime(timezone=True), nullable=True)
 
     currency = db.Column(db.String(10), default="ILS")
@@ -779,34 +772,20 @@ def morning_emails(recipient):
 
     if isinstance(emails, str):
         emails = [emails]
-    elif not isinstance(emails, list):
-        emails = []
 
-    single_email = str(recipient.get("email") or "").strip()
-    cleaned = []
-
-    for email in emails:
-        value = str(email or "").strip()
-        if value and value not in cleaned:
-            cleaned.append(value)
-
-    if single_email and single_email not in cleaned:
-        cleaned.append(single_email)
-
-    return cleaned
+    return [
+        str(email).strip()
+        for email in emails
+        if str(email).strip()
+    ]
 
 
 def find_morning_lead(recipient):
-    """
-    Morning -> CRM matching rule:
-    Match automatically ONLY by customer phone/mobile.
-    We intentionally do not fall back to email or name, to avoid
-    attaching a payment to the wrong lead.
-    """
     phones = {
         normalize_phone(recipient.get("phone")),
-        normalize_phone(recipient.get("mobile")),
+        normalize_phone(recipient.get("mobile"))
     }
+
     phones.discard("")
 
     if not phones:
@@ -814,250 +793,49 @@ def find_morning_lead(recipient):
 
     for lead in Lead.query.all():
         lead_phone = normalize_phone(lead.phone)
+
         if lead_phone and lead_phone in phones:
             return lead, "phone"
 
     return None, ""
 
-
 def morning_document_type_name(type_code):
     names = {
         10: "הצעת מחיר",
-        20: "חשבון / אישור תשלום",
-        100: "הזמנה",
-        200: "תעודת משלוח",
-        210: "תעודת החזרה",
-        300: "חשבון עסקה",
-        305: "חשבונית מס",
         320: "חשבונית מס / קבלה",
-        330: "חשבונית זיכוי",
         400: "קבלה",
-        405: "קבלה על תרומה",
-        410: "ביטול תרומה",
-        500: "הזמנת רכש",
-        600: "קבלת פיקדון",
-        610: "משיכת פיקדון",
     }
 
-    try:
-        normalized = int(type_code)
-    except (TypeError, ValueError):
-        normalized = type_code
+    return names.get(type_code, f"Morning {type_code}")
 
-    return names.get(normalized, f"Morning {type_code}")
-
-
-def morning_transactions(payload):
-    """
-    Morning document payloads may expose payment rows as either
-    `transactions` (webhook payload) or `payment` (document payload).
-    Always return a clean list of dictionaries.
-    """
-    transactions = payload.get("transactions")
-
-    if not transactions:
-        transactions = payload.get("payment")
-
-    if isinstance(transactions, dict):
-        transactions = [transactions]
-
-    if not isinstance(transactions, list):
-        return []
-
-    return [
-        transaction
-        for transaction in transactions
-        if isinstance(transaction, dict)
-    ]
-
-
-def morning_payment_method_name(transaction):
-    payment_codes = {
-        0: "ניכוי במקור",
-        1: "מזומן",
-        2: "המחאה",
-        3: "כרטיס אשראי",
-        4: "העברה בנקאית",
-        5: "PayPal",
-        10: "אפליקציית תשלום",
-        11: "אחר",
-    }
-
-    app_codes = {
-        1: "Bit",
-        2: "Pay",
-        3: "PayBox",
-        5: "Google Pay",
-        6: "Apple Pay",
-    }
-
-    if not isinstance(transaction, dict):
-        transaction = {"type": transaction}
-
-    payment_code = None
-
-    for value in (
-        transaction.get("paymentType"),
-        transaction.get("type"),
-        transaction.get("method"),
-        transaction.get("paymentMethod"),
-    ):
-        if isinstance(value, dict):
-            value = (
-                value.get("type")
-                or value.get("code")
-                or value.get("id")
-                or value.get("name")
-            )
-
-        try:
-            number = int(value)
-        except (TypeError, ValueError):
-            continue
-
-        if number in payment_codes:
-            payment_code = number
-            break
-
-    if payment_code == 10:
-        try:
-            app_type = int(transaction.get("appType"))
-        except (TypeError, ValueError):
-            app_type = None
-
-        if app_type in app_codes:
-            return app_codes[app_type]
-
-        return "אפליקציית תשלום"
-
-    if payment_code is not None:
-        return payment_codes[payment_code]
-
-    values = " ".join(
-        str(value or "")
-        for value in transaction.values()
-    ).lower()
-
-    if "bit" in values:
-        return "Bit"
-    if "paybox" in values:
-        return "PayBox"
-    if "bank" in values or "transfer" in values:
-        return "העברה בנקאית"
-    if "cash" in values:
-        return "מזומן"
-    if "credit" in values or "card" in values:
-        return "כרטיס אשראי"
-    if "paypal" in values:
-        return "PayPal"
-
-    return ""
-
-
-def morning_transaction_reference(transaction):
-    if not isinstance(transaction, dict):
-        return ""
-
-    for key in (
-        "reference",
-        "referenceNumber",
-        "transactionId",
-        "confirmationNumber",
-        "checkNumber",
-        "dealId",
-    ):
-        value = transaction.get(key)
-        if value not in (None, ""):
-            return str(value)
-
-    return ""
-
-
-def morning_transaction_amount(transaction):
-    if not isinstance(transaction, dict):
-        return None
-
-    for key in ("price", "amount", "total", "sum"):
-        value = morning_number(transaction.get(key))
-        if value is not None:
-            return value
-
-    return None
-
-
-def morning_transaction_datetime(transaction):
-    if not isinstance(transaction, dict):
-        return None
-
-    value = (
-        transaction.get("paidAt")
-        or transaction.get("date")
-        or transaction.get("createdAt")
-    )
-
-    if not value:
-        return None
-
-    text_value = str(value)
-
-    # A date-only value should represent the Morning payment date
-    # in the business timezone, not midnight UTC.
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text_value):
-        try:
-            local_dt = datetime.fromisoformat(text_value).replace(tzinfo=TZ)
-            return local_dt.astimezone(timezone.utc)
-        except ValueError:
-            return None
-
-    return morning_datetime(value)
-    
-def morning_payment_terms_name(value):
-    names = {
-        -1: "מיידי",
-        0: "שוטף",
-        10: "שוטף+10",
-        15: "שוטף+15",
-        30: "שוטף+30",
-        45: "שוטף+45",
-        60: "שוטף+60",
-        75: "שוטף+75",
-        90: "שוטף+90",
-        120: "שוטף+120",
-    }
-
-    try:
-        code = int(value)
-    except (TypeError, ValueError):
-        return ""
-
-    return names.get(code, str(code))
 
 def sync_morning_document_to_payment(document, payload, lead):
     """
-    Create/update one CRM Payment for a Morning payment document.
-
-    A document is treated as a payment when it is a receipt-like type
-    or when Morning supplied actual payment rows. The CRM link is made
-    only when the Morning customer phone matches a CRM lead phone.
+    Creates/updates ONE CRM Payment for a Morning receipt/payment document.
+    Quotes and ordinary documents do not create Payments.
     """
-    transactions = morning_transactions(payload)
 
-    try:
-        document_type = int(document.document_type_code)
-    except (TypeError, ValueError):
-        document_type = document.document_type_code
+    transactions = payload.get("transactions") or []
+    document_type = payload.get("type")
 
+    # קבלה / חשבונית מס-קבלה, או מסמך שיש בו תקבולים בפועל
     is_payment_document = (
-        document_type in (320, 400, 405, 600)
+        document_type in (320, 400)
         or bool(transactions)
     )
 
     if not is_payment_document:
-        return {"status": "not_payment_document"}
+        return {
+            "status": "not_payment_document"
+        }
 
+    # בלי התאמה לליד לא מכניסים תשלום לליד הלא נכון
     if lead is None:
-        return {"status": "unmatched_lead"}
+        return {
+            "status": "unmatched_lead"
+        }
 
+    # מונע כפילות אם Morning שולחת שוב את אותו webhook
     payment = Payment.query.filter_by(
         morning_document_id=document.morning_document_id
     ).first()
@@ -1066,87 +844,105 @@ def sync_morning_document_to_payment(document, payload, lead):
         payment = Payment(
             payment_uid=new_payment_uid(),
             lead_id=lead.id,
-            amount=0,
+            amount=document.total or 0
         )
+
         db.session.add(payment)
 
+    # נאסוף אמצעי תשלום ואסמכתאות מתוך פירוט התקבולים
     methods = []
     references = []
     morning_payment_ids = []
-    transaction_amounts = []
-    transaction_dates = []
 
     for transaction in transactions:
-        method = morning_payment_method_name(transaction)
-        if method and method not in methods:
-            methods.append(method)
 
-        reference = morning_transaction_reference(transaction)
-        if reference and reference not in references:
-            references.append(reference)
+        method = (
+            transaction.get("method")
+            or transaction.get("type")
+            or transaction.get("paymentType")
+            or ""
+        )
+
+        if method not in (None, ""):
+            method = str(method)
+
+            if method not in methods:
+                methods.append(method)
+
+        reference = (
+            transaction.get("reference")
+            or transaction.get("referenceNumber")
+            or transaction.get("transactionId")
+            or ""
+        )
+
+        if reference:
+            reference = str(reference)
+
+            if reference not in references:
+                references.append(reference)
 
         payment_id = (
             transaction.get("id")
             or transaction.get("paymentId")
             or ""
         )
-        if payment_id not in (None, ""):
+
+        if payment_id:
             payment_id = str(payment_id)
+
             if payment_id not in morning_payment_ids:
                 morning_payment_ids.append(payment_id)
 
-        transaction_amount = morning_transaction_amount(transaction)
-        if transaction_amount is not None:
-            transaction_amounts.append(transaction_amount)
-
-        transaction_date = morning_transaction_datetime(transaction)
-        if transaction_date is not None:
-            transaction_dates.append(transaction_date)
-
-    if document.total is not None:
-        payment_amount = document.total
-    elif transaction_amounts:
-        payment_amount = sum(transaction_amounts)
-    else:
-        payment_amount = 0
-
     payment.lead_id = lead.id
-    payment.amount = payment_amount
+
+    payment.amount = document.total or 0
+
     payment.payment_type = morning_document_type_name(
         document.document_type_code
     )
+
     payment.method = " / ".join(methods)
+
     payment.reference = " / ".join(references)
+
     payment.status = "שולם"
+
     payment.note = (
         document.description
         or document.remarks
         or ""
     )
+
     payment.morning_payment_id = (
         morning_payment_ids[0]
         if morning_payment_ids
         else ""
     )
-    payment.morning_document_id = document.morning_document_id
+
+    payment.morning_document_id = (
+        document.morning_document_id
+    )
+
     payment.document_type = morning_document_type_name(
         document.document_type_code
     )
-    payment.document_number = document.document_number
+
+    payment.document_number = (
+        document.document_number
+    )
+
     payment.document_url = (
         document.document_url_he
         or document.document_url_en
         or ""
     )
-    
-    payment.payment_terms = document.payment_terms
-    payment.payment_terms_text = document.payment_terms_text
-    payment.due_date = document.due_date
+
     payment.last_sync_at = utc_now()
+
+    # תאריך תשלום
     payment.paid_at = (
-        transaction_dates[0]
-        if transaction_dates
-        else document.created_at_morning
+        document.created_at_morning
         or utc_now()
     )
 
@@ -1155,10 +951,8 @@ def sync_morning_document_to_payment(document, payload, lead):
         "payment_uid": payment.payment_uid,
         "amount": float(payment.amount or 0),
         "document_number": payment.document_number,
-        "method": payment.method,
     }
-
-
+    
 @app.post("/webhook/morning")
 @app.post("/webhook/morning/<path_token>")
 def morning_webhook(path_token=None):
@@ -1181,8 +975,8 @@ def morning_webhook(path_token=None):
 
     try:
         document_id = str(
-            payload.get("documentId")
-            or payload.get("id")
+            payload.get("id")
+            or payload.get("documentId")
             or ""
         )
 
@@ -1213,18 +1007,12 @@ def morning_webhook(path_token=None):
             document = MorningDocument(
                 morning_document_id=document_id
             )
-            db.session.add(document)
-        elif lead is None and document.lead_id:
-            # Webhook חוזר/חלקי לא מוחק שיוך שכבר הצלחנו לבצע.
-            lead = db.session.get(Lead, document.lead_id)
-            matched_by = document.matched_by
 
-        # שיוך ל-CRM מתבצע אוטומטית רק לפי טלפון.
-        if lead is not None:
-            document.lead_id = lead.id
-            document.matched_by = matched_by or "phone"
-        elif document.lead_id is None:
-            document.matched_by = ""
+            db.session.add(document)
+
+        # שיוך ל-CRM
+        document.lead_id = lead.id if lead else None
+        document.matched_by = matched_by
 
         # פרטי המסמך
         document.business_id = str(
@@ -1242,25 +1030,6 @@ def morning_webhook(path_token=None):
         document.document_date = morning_date(
             payload.get("date")
         )
-        raw_payment_terms = (
-    payload.get("paymentTerms")
-    if payload.get("paymentTerms") not in (None, "")
-    else recipient.get("paymentTerms")
-)
-
-try:
-    document.payment_terms = int(raw_payment_terms)
-except (TypeError, ValueError):
-    document.payment_terms = None
-
-document.payment_terms_text = morning_payment_terms_name(
-    document.payment_terms
-)
-
-document.due_date = morning_date(
-    payload.get("dueDate")
-)
-        
 
         document.created_at_morning = morning_datetime(
             payload.get("createdAt")
@@ -1372,7 +1141,9 @@ document.due_date = morning_date(
         )
 
         # פירוט התקבולים
-        document.transactions_json = morning_transactions(payload)
+        document.transactions_json = (
+            payload.get("transactions") or []
+        )
 
         # מסמכים מקושרים
         document.linked_documents_json = (
@@ -1431,8 +1202,6 @@ document.due_date = morning_date(
         )
 
         db.session.commit()
-
-       
 
         app.logger.warning(
             "MORNING SAVED | document=%s | number=%s | total=%s | lead=%s | matched=%s",
@@ -1647,38 +1416,7 @@ def webhook():
         return jsonify({"received": False, "error": str(exc)}), 503
 
 def payment_to_dict(payment):
-    "payment_terms": payment.payment_terms,
-    "payment_terms_text": payment.payment_terms_text,
-    "due_date": payment.due_date.isoformat() if payment.due_date else None,
     lead = payment.lead
-
-    morning_document = None
-    if payment.morning_document_id:
-        morning_document = MorningDocument.query.filter_by(
-            morning_document_id=payment.morning_document_id
-        ).first()
-
-    country = ""
-    payment_terms = ""
-
-    if morning_document:
-        country = (
-            morning_document.recipient_country
-            or morning_document.country
-            or ""
-        )
-
-        raw = morning_document.raw_payload or {}
-
-        if "paymentTerms" in raw:
-            payment_terms_value = raw.get("paymentTerms")
-        else:
-            payment_terms_value = raw.get("payment_terms")
-
-        if str(payment_terms_value) == "-1":
-            payment_terms = "מיידי"
-        elif payment_terms_value not in (None, ""):
-            payment_terms = f"נטו {payment_terms_value}"
 
     return {
         "id": payment.id,
@@ -1686,7 +1424,6 @@ def payment_to_dict(payment):
         "lead_id": payment.lead_id,
         "lead_uid": lead.lead_uid if lead else "",
         "customer_name": lead.customer_name if lead else "",
-        "customer_phone": lead.phone if lead else "",
 
         "paid_at": local_iso(payment.paid_at),
         "payment_type": payment.payment_type,
@@ -1702,12 +1439,8 @@ def payment_to_dict(payment):
         "document_number": payment.document_number,
         "document_url": payment.document_url,
         "last_sync_at": local_iso(payment.last_sync_at),
-
-        "payment_terms": payment_terms,
-        "country": country,
     }
-
-
+    
 @app.get("/api/leads")
 @admin_required
 def api_leads():
@@ -1851,7 +1584,7 @@ def api_morning_documents():
                 document.transactions_json or [],
 
             "document_url":
-                document.document_url_he or document.document_url_en,
+                document.document_url_he,
 
             "lead_id":
                 document.lead_id,
@@ -2031,12 +1764,6 @@ def migrate_payments_table():
         return
 
     statements = [
-        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_terms INTEGER",
-        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_terms_text VARCHAR(50) DEFAULT ''",
-        "ALTER TABLE payments ADD COLUMN IF NOT EXISTS due_date DATE",
-        "ALTER TABLE morning_documents ADD COLUMN IF NOT EXISTS payment_terms INTEGER",
-        "ALTER TABLE morning_documents ADD COLUMN IF NOT EXISTS payment_terms_text VARCHAR(50) DEFAULT ''",
-        "ALTER TABLE morning_documents ADD COLUMN IF NOT EXISTS due_date DATE",
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_uid VARCHAR(80)",
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_type VARCHAR(100) DEFAULT ''",
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS reference VARCHAR(255) DEFAULT ''",
@@ -2047,10 +1774,7 @@ def migrate_payments_table():
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS document_number VARCHAR(100) DEFAULT ''",
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS document_url TEXT DEFAULT ''",
         "ALTER TABLE payments ADD COLUMN IF NOT EXISTS last_sync_at TIMESTAMPTZ",
-        "CREATE UNIQUE INDEX IF NOT EXISTS ix_payments_payment_uid ON payments (payment_uid)",
-        """CREATE UNIQUE INDEX IF NOT EXISTS ix_payments_morning_document_id_nonempty
-           ON payments (morning_document_id)
-           WHERE morning_document_id IS NOT NULL AND morning_document_id <> ''"""
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_payments_payment_uid ON payments (payment_uid)"
     ]
 
     # Gunicorn runs more than one worker. The advisory lock makes sure only
