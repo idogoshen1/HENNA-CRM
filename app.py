@@ -805,7 +805,7 @@ def find_morning_lead(recipient):
     if not phones:
         return None, ""
 
-    for lead in Lead.query.all():
+    for lead in Lead.query.order_by(Lead.last_contact_at.desc()).all():
         lead_phone = normalize_phone(lead.phone)
 
         if lead_phone and lead_phone in phones:
@@ -1261,7 +1261,65 @@ def morning_payment_terms(payload):
         return "שוטף"
 
     return f"שוטף + {days}"
+    
+def morning_payment_method_name(transaction):
+    # קודם ננסה שם מפורש שמגיע מ-Morning
+    raw_method = (
+        transaction.get("method")
+        or transaction.get("methodName")
+        or transaction.get("paymentMethod")
+        or ""
+    )
 
+    raw_text = str(raw_method).strip()
+
+    # "default" לא נותן לנו מידע שימושי
+    if raw_text and raw_text.lower() not in ("default", "unknown"):
+        # אם זה כבר שם ולא מספר - נשמור אותו כמו שהוא
+        if not raw_text.lstrip("-").isdigit():
+            return raw_text
+
+    raw_type = (
+        transaction.get("type")
+        if transaction.get("type") not in (None, "")
+        else transaction.get("paymentType")
+    )
+
+    try:
+        type_code = int(raw_type)
+    except (TypeError, ValueError):
+        return raw_text if raw_text.lower() != "default" else ""
+
+    # אפליקציות תשלום
+    if type_code == 10:
+        app_type = transaction.get("appType")
+
+        try:
+            app_type = int(app_type)
+        except (TypeError, ValueError):
+            app_type = None
+
+        apps = {
+            1: "Bit",
+            2: "Pay",
+            3: "PayBox",
+            5: "Google Pay",
+            6: "Apple Pay",
+        }
+
+        return apps.get(app_type, "אפליקציית תשלום")
+
+    methods = {
+        0: "ניכוי במקור",
+        1: "מזומן",
+        2: "צ'ק",
+        3: "כרטיס אשראי",
+        4: "העברה בנקאית",
+        5: "פייפאל",
+        11: "אחר",
+    }
+
+    return methods.get(type_code, raw_text or f"אמצעי תשלום {type_code}")
 
 def sync_morning_document_to_payment(document, payload, lead):
     """
