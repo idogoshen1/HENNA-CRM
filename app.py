@@ -806,6 +806,26 @@ def morning_document_type_name(type_code):
     }
 
     return names.get(type_code, f"Morning {type_code}")
+    
+def morning_payment_method_name(value):
+    names = {
+        0: "ניכוי במקור",
+        1: "מזומן",
+        2: "המחאה",
+        3: "כרטיס אשראי",
+        4: "העברה בנקאית",
+        5: "PayPal",
+        10: "אפליקציית תשלום",
+        11: "אחר",
+    }
+
+    if value in (None, ""):
+        return ""
+
+    try:
+        return names.get(int(value), str(value))
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def sync_morning_document_to_payment(document, payload, lead):
@@ -814,7 +834,11 @@ def sync_morning_document_to_payment(document, payload, lead):
     Quotes and ordinary documents do not create Payments.
     """
 
-    transactions = payload.get("transactions") or []
+    transactions = (
+    payload.get("transactions")
+    or payload.get("payment")
+    or []
+)
     document_type = payload.get("type")
 
     # קבלה / חשבונית מס-קבלה, או מסמך שיש בו תקבולים בפועל
@@ -855,18 +879,24 @@ def sync_morning_document_to_payment(document, payload, lead):
 
     for transaction in transactions:
 
-        method = (
+        raw_method = (
             transaction.get("method")
+            or transaction.get("paymentMethod") 
             or transaction.get("type")
             or transaction.get("paymentType")
             or ""
         )
 
-        if method not in (None, ""):
-            method = str(method)
+        if isinstance(raw_method, dict):
+            raw_method = (
+                raw_method.get("name")
+                or raw_method.get("type")
+            )
 
-            if method not in methods:
-                methods.append(method)
+        method = morning_payment_method_name(raw_method)
+
+        if method and method not in methods:
+            methods.append(method)
 
         reference = (
             transaction.get("reference")
@@ -898,8 +928,8 @@ def sync_morning_document_to_payment(document, payload, lead):
     payment.amount = document.total or 0
 
     payment.payment_type = morning_document_type_name(
-        document.document_type_code
-    )
+    document.document_type_code
+)
 
     payment.method = " / ".join(methods)
 
@@ -1141,8 +1171,10 @@ def morning_webhook(path_token=None):
 
         # פירוט התקבולים
         document.transactions_json = (
-            payload.get("transactions") or []
-        )
+            payload.get("transactions")
+            or payload.get("payment")
+            or []
+       }  
 
         # מסמכים מקושרים
         document.linked_documents_json = (
