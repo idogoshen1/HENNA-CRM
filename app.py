@@ -1189,6 +1189,7 @@
     
         return ""
         
+   
     def morning_payment_method_name(transaction):
     """
     Normalize Morning payment-method data to one friendly display value.
@@ -1585,7 +1586,7 @@
             return f"כרטיס אשראי - {card_name}"
 
     return result
-        
+            
     def sync_morning_document_to_payment(document, payload, lead):
         """
         Create/update one CRM Payment for a Morning payment document.
