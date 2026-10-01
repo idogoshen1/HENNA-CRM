@@ -1192,13 +1192,13 @@ def morning_payment_terms(payload):
 def morning_payment_method_name(transaction):
     """
     Normalize Morning payment-method data to one friendly display value.
-    The JSON key remains `method`; only its value is normalized.
+    Only payment-method fields are interpreted here.
     """
     if not isinstance(transaction, dict):
         transaction = {"type": transaction}
 
-    # Morning payloads can place payment data in a few nested containers.
     containers = [transaction]
+
     for key in (
         "method",
         "paymentMethod",
@@ -1209,6 +1209,7 @@ def morning_payment_method_name(transaction):
         "application",
     ):
         value = transaction.get(key)
+
         if isinstance(value, dict):
             containers.append(value)
 
@@ -1237,34 +1238,62 @@ def morning_payment_method_name(transaction):
         "unpaid": "לא שולם",
     }
 
-    # Prefer a human-readable name if Morning sends one.
+    def normalize_method_text(value):
+        return " ".join(
+            str(value)
+            .strip()
+            .lower()
+            .replace("_", " ")
+            .replace("-", " ")
+            .split()
+        )
+
+    # שמות מפורשים של אמצעי תשלום בלבד.
+    # בכוונה לא קוראים description כדי שלא יזוהה בטעות כאמצעי תשלום.
     text_candidates = []
-    for container in containers:
-        for key in (
+
+    for index, container in enumerate(containers):
+        keys = [
             "methodName",
             "paymentMethodName",
             "appName",
             "applicationName",
-            "name",
             "label",
-            "description",
             "method",
             "paymentMethod",
-        ):
+        ]
+
+        # name רלוונטי רק בתוך אובייקט פנימי של אמצעי תשלום.
+        if index > 0:
+            keys.append("name")
+
+        for key in keys:
             value = container.get(key)
-            if isinstance(value, (str, int, float)) and str(value).strip():
+
+            if (
+                isinstance(value, (str, int, float))
+                and str(value).strip()
+            ):
                 text_candidates.append(str(value).strip())
 
-    # First handle exact names and Hebrew labels.
+    # קודם טקסט מפורש
     for raw_text in text_candidates:
-        lower = raw_text.lower().strip()
-        if lower in english_names:
-            return english_names[lower]
-        if any("\u0590" <= ch <= "\u05ff" for ch in raw_text):
+        normalized = normalize_method_text(raw_text)
+
+        if normalized in english_names:
+            return english_names[normalized]
+
+        if any(
+            "\u0590" <= ch <= "\u05ff"
+            for ch in raw_text
+        ):
             return raw_text
 
-    # Then search all readable text for known brands/methods.
-    all_text = " ".join(text_candidates).lower()
+    all_text = " ".join(
+        normalize_method_text(value)
+        for value in text_candidates
+    )
+
     keyword_map = (
         ("paybox", "PayBox"),
         ("google pay", "Google Pay"),
@@ -1281,39 +1310,57 @@ def morning_payment_method_name(transaction):
         ("credit", "כרטיס אשראי"),
         ("card", "כרטיס אשראי"),
     )
+
     for needle, display_name in keyword_map:
         if needle in all_text:
             return display_name
 
-    # Read Morning's numeric payment type from either the top-level or nested data.
+    # חשוב:
+    # paymentType קודם ל-type,
+    # כי type עלול להיות סוג המסמך (למשל 400 = קבלה).
     raw_type = None
+
     for container in containers:
         for key in (
-            "type",
             "paymentType",
             "methodType",
             "paymentMethodType",
+            "paymentMethod",
+            "method",
+            "type",
         ):
             value = container.get(key)
-            if value not in (None, ""):
+
+            if (
+                isinstance(value, (str, int, float))
+                and str(value).strip()
+            ):
                 raw_type = value
                 break
+
         if raw_type not in (None, ""):
             break
 
     try:
-        type_code = int(raw_type)
+        type_code = int(float(raw_type))
     except (TypeError, ValueError):
-        # If Morning supplied a useful free-text value, keep it instead of a JSON object/code.
         for raw_text in text_candidates:
-            lower = raw_text.lower().strip()
-            if lower not in ("default", "unknown", "none", "null"):
+            normalized = normalize_method_text(raw_text)
+
+            if normalized not in (
+                "default",
+                "unknown",
+                "none",
+                "null",
+            ):
                 return raw_text
+
         return ""
 
-    # Payment applications: resolve the chosen app/brand when available.
+    # אפליקציות תשלום
     if type_code == 10:
         app_type = None
+
         for container in containers:
             for key in (
                 "appType",
@@ -1322,12 +1369,18 @@ def morning_payment_method_name(transaction):
                 "paymentApplicationType",
             ):
                 value = container.get(key)
-                if value not in (None, ""):
+
+                if (
+                    isinstance(value, (str, int, float))
+                    and str(value).strip()
+                ):
                     try:
-                        app_type = int(value)
+                        app_type = int(float(value))
                     except (TypeError, ValueError):
                         app_type = None
+
                     break
+
             if app_type is not None:
                 break
 
@@ -1342,16 +1395,16 @@ def morning_payment_method_name(transaction):
         if app_type in apps:
             return apps[app_type]
 
-        # A brand name may be present even when appType is absent/unknown.
         for raw_text in text_candidates:
-            lower = raw_text.lower()
+            normalized = normalize_method_text(raw_text)
+
             for needle, display_name in (
                 ("paybox", "PayBox"),
                 ("google pay", "Google Pay"),
                 ("apple pay", "Apple Pay"),
                 ("bit", "Bit"),
             ):
-                if needle in lower:
+                if needle in normalized:
                     return display_name
 
         return "אפליקציית תשלום"
@@ -1369,17 +1422,28 @@ def morning_payment_method_name(transaction):
 
     result = methods.get(type_code)
 
+    # פירוט סוג כרטיס אשראי אם Morning שלחה אותו
     if result == "כרטיס אשראי":
         card_type = None
+
         for container in containers:
-            for key in ("cardType", "creditCardType"):
+            for key in (
+                "cardType",
+                "creditCardType",
+            ):
                 value = container.get(key)
-                if value not in (None, ""):
+
+                if (
+                    isinstance(value, (str, int, float))
+                    and str(value).strip()
+                ):
                     try:
-                        card_type = int(value)
+                        card_type = int(float(value))
                     except (TypeError, ValueError):
                         card_type = None
+
                     break
+
             if card_type is not None:
                 break
 
@@ -1392,11 +1456,14 @@ def morning_payment_method_name(transaction):
         }
 
         card_name = card_names.get(card_type, "")
+
         if card_name:
             return f"כרטיס אשראי - {card_name}"
 
-    return result or f"אמצעי תשלום {type_code}"
-
+    # אם זה מספר כמו 320/400 שהוא סוג מסמך ולא אמצעי תשלום,
+    # לא מציגים "אמצעי תשלום 400".
+    return result or ""
+    
 def sync_morning_document_to_payment(document, payload, lead):
     """
     Create/update one CRM Payment for a Morning payment document.
